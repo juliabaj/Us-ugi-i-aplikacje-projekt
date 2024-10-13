@@ -63,8 +63,8 @@ def decrypt_file(encrypted_file_path, password):
         decrypted_data = unpadder.update(decrypted_padded_data) + unpadder.finalize()
 
         original_file_path = encrypted_file_path.replace(".enc", "")  # przywracanie poprzedniej nazwy
-        with open(original_file_path, 'wb') as f_dec:
-            f_dec.write(decrypted_data)
+        with open(original_file_path, 'wb') as file:
+            file.write(decrypted_data)
 
         print("Plik został odszyfrowany i zapisany jako:", original_file_path)
     except:
