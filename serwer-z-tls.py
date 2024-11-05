@@ -3,6 +3,9 @@ import ssl
 import os
 import logging
 from pathlib import Path
+import threading
+import subprocess
+import re
 
 #Konfiguracja podstawowego logowania
 logging.basicConfig(
@@ -11,13 +14,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
 def start_server(host='127.0.0.1', port=8080):
     
     try:
-        #Stwórz i skonfiguruj kontekst SSL
+        
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         
-        #Załaduj certyfikaty
+        
         try:
             context.load_cert_chain(certfile="server.crt", keyfile="server.key")
         except FileNotFoundError:
@@ -28,9 +33,9 @@ def start_server(host='127.0.0.1', port=8080):
             os.system('openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"')
             context.load_cert_chain(certfile="server.crt", keyfile="server.key")
 
-        #Stwórz socket
+        
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            #Pozwól na ponowne użycie adresu
+            
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
             sock.listen(5)
@@ -54,7 +59,7 @@ def start_server(host='127.0.0.1', port=8080):
                                 filesize = os.path.getsize(filename)
                                 conn.send(f"{filename},{filesize}".encode())
 
-                                #Wysyłanie pliku
+                               #Tu się wysyła plik
                                 with open(filename, 'rb') as f:
                                     sent = 0
                                     while True:

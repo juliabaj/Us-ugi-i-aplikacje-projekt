@@ -7,6 +7,8 @@ import hashlib
 from tqdm import tqdm
 import szyfrowanie
 import deszyfrowanie
+import subprocess
+import re
 
 #konfiguracja podstawowego logowania
 logging.basicConfig(
@@ -14,6 +16,25 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def get_available_users(mac_list):
+    available_users = {}
+    try:
+        output = subprocess.check_output("arp -a", shell=True).decode()
+        lines = output.splitlines()
+        
+        for name, mac in mac_list.items():
+            for line in lines:
+                if mac.lower() in line.lower():
+                    ip_address = re.search(r'\d+\.\d+\.\d+\.\d+', line)
+                    if ip_address:
+                        available_users[name] = ip_address.group(0)
+                        break
+        return available_users
+    except Exception as e:
+        logger.error(f"Błąd podczas sprawdzania dostępnych użytkowników: {str(e)}")
+        return {}
+    
 
 def setup_client_ssl_context() -> ssl.SSLContext:
     
@@ -49,13 +70,13 @@ def calculate_file_hash(filepath: str) -> str:
 
 def send_file(
     file_path: str,
-    host: str,
+    target_ip: str,
     port: int = 8080,
     cert_file: str = "server.crt",
     key_file: str = "server.key",
     buffer_size: int = 8192
 ) -> bool:
-#To znaczy, że funkcja zwraca bool
+
 
     if not os.path.exists(file_path):
         logger.error(f"File not found: {file_path}")
@@ -66,13 +87,12 @@ def send_file(
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind((host, port))
-            sock.listen(5)
-            logger.info(f"Czekanie na połączenie {host}:{port}")
+            sock.connect((target_ip, port))
+            logger.info(f"Łączenie z {target_ip}:{port}")
 
-            with context.wrap_socket(sock, server_side=True) as secure_sock:
-                conn, addr = secure_sock.accept()
-                logger.info(f"Połączono do {addr}")
+            with context.wrap_socket(sock, server_side=False, server_hostname=target_ip) as secure_sock:
+                
+                logger.info(f"Połączono do {target_ip}")
 
                 try:
                     file_name = os.path.basename(file_path)
@@ -80,7 +100,7 @@ def send_file(
 
                     #Wysyłanie metadanych pliku i hasha
                     metadata = f"{file_name},{file_size},{file_hash}"
-                    conn.send(metadata.encode())
+                    secure_sock.send(metadata.encode())
 
                     with open(file_path, 'rb') as file:
                         with tqdm(total=file_size, unit='B', unit_scale=True) as pbar:
@@ -89,7 +109,7 @@ def send_file(
                                 data = file.read(buffer_size)
                                 if not data:
                                     break
-                                conn.sendall(data)
+                                secure_sock.sendall(data)
                                 sent += len(data)
                                 pbar.update(len(data))
 
@@ -100,85 +120,82 @@ def send_file(
                     logger.error(f"Błąd podczas wysyłania: {e}")
                     return False
                 finally:
-                    conn.close()
+                    secure_sock.close()
 
     except Exception as e:
         logger.error(f"Błąd połączenia: {e}")
         return False
 
+
 def receive_file(
-    host: str = 'localhost',
     port: int = 8080,
     timeout: int = 600,
     buffer_size: int = 8192
 ) -> bool:
 
     context = setup_client_ssl_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
 
     try:
-        with socket.create_connection((host, port)) as sock:
-            with context.wrap_socket(sock, server_hostname=host) as secure_sock:
-                secure_sock.settimeout(timeout)
-                logger.info(f"Połączony do {host}:{port}")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(('0.0.0.0', port))
+            sock.listen(1)
+            sock.settimeout(timeout)
+            logger.info(f"Oczekiwanie na połączenie na porcie {port}")
 
-                try:
-                    #Nie wiem czemu po przepuszczeniu tego przez claude coś się zmieniło i wystarczy kliknąć enter wtedy dobrze wyśle po wpisaniu nazwy pliku wysyła połowe jego
-                    filename = input("Wpisz nazwe pliku, który chcesz otrzymać: ")
-                    secure_sock.send(filename.encode())
+            while True:
+                    conn, addr = sock.accept()
+                    logger.info(f"Połączenie przychodzące od {addr}")
 
-                    response = secure_sock.recv(1024).decode()
+                    with context.wrap_socket(conn, server_side=True) as secure_sock:
+                        try:
+                            response = secure_sock.recv(1024).decode()
+                            filename, filesize, expected_hash = response.split(",")
+                            filesize = int(filesize)
 
-                    if response == "File not found":
-                        logger.error("Plik nie znaleziony na serwerze")
-                        return False
+                            logger.info(f"Otrzymywanie pliku: {filename} ({filesize} bytów)")
 
-                    if response == "Access denied or invalid filename":
-                        logger.error("Brak dostępu lub nieznana nazwa pliku")
-                        return False
+                            output_path = Path("downloads") / filename
+                            output_path.parent.mkdir(exist_ok=True)
 
-                    filename, filesize, expected_hash = response.split(",")
-                    filesize = int(filesize)
+                            with open(output_path, 'wb') as f:
+                                with tqdm(total=filesize, unit='B', unit_scale=True) as pbar:
+                                    received = 0
+                                    while received < filesize:
+                                        data = secure_sock.recv(min(buffer_size, filesize - received))
+                                        if not data:
+                                            break
+                                        f.write(data)
+                                        received += len(data)
+                                        pbar.update(len(data))
 
-                    logger.info(f"Otrzymywanie pliku: {filename} ({filesize} bytów)")
+                            haslo = (input("Podaj hasło aby odszyfrować plik: ").encode())
+                            path = output_path
+                            print(f"To jest ścieżka do pliku {path}")
+                            path = r"{}".format(path)
+                            deszyfrowanie.decrypt_file(path, haslo)
+                            #Weryfikowanie hasha pliku
+                            received_hash = calculate_file_hash(str(output_path))
+                            if received_hash != expected_hash:
+                                logger.error("File integrity check failed!")
+                                os.remove(output_path)
+                                return False
 
-                    output_path = Path("downloads") / filename
-                    output_path.parent.mkdir(exist_ok=True)
+                            logger.info(f"Pomyślnie otrzymano plik: {filename}")
+                            return True
 
-                    with open(output_path, 'wb') as f:
-                        with tqdm(total=filesize, unit='B', unit_scale=True) as pbar:
-                            received = 0
-                            while received < filesize:
-                                data = secure_sock.recv(min(buffer_size, filesize - received))
-                                if not data:
-                                    break
-                                f.write(data)
-                                received += len(data)
-                                pbar.update(len(data))
-
-                    haslo = (input("Podaj hasło aby odszyfrować plik: ").encode())
-                    path = output_path
-                    print(f"To jest ścieżka do pliku {path}")
-                    path = r"{}".format(path)
-                    deszyfrowanie.decrypt_file(path, haslo)
-                    #Weryfikowanie hasha pliku
-                    received_hash = calculate_file_hash(str(output_path))
-                    if received_hash != expected_hash:
-                        logger.error("File integrity check failed!")
-                        os.remove(output_path)
-                        return False
-
-                    logger.info(f"Pomyślnie otrzymano plik: {filename}")
-                    return True
-
-                except Exception as e:
-                    logger.error(f"Błąd podczas otrzymywania pliku: {e}")
-                    return False
+                        except Exception as e:
+                            logger.error(f"Błąd podczas otrzymywania pliku: {e}")
+                            return False
 
     except Exception as e:
         logger.error(f"Błąd połączenia: {e}")
         return False
 
 def main():
+    mac_list = {"Gabrys2":"F4-A4-75-06-AF-72" }
     while True:
         print("\nKlient do zaszyfrowanego przesyłu plików")
         print("1. Wyślij plik")
@@ -188,21 +205,43 @@ def main():
         choice = input("\nWybierz: ").lower()
         
         if choice == '1':
-            file_path = input("Podaj ścieżkę do pliku: ")
-            file_path = file_path
-            password = (input("Zaszyfruj plik hasłem: ").encode())
-            szyfrowanie.encrypt_file(file_path, password)
-            enc_file_path = file_path + ".enc"
-            host_ip = input("Wpisz swój adres IP: ")
-            port = int(8080)
-            send_file(enc_file_path, host_ip, port)
+            available_users = get_available_users(mac_list)
+            if not available_users:
+                print("Nie ma dostępnych użytkowników")
+                continue
+            print("\nDostępni użytkownicy:")
+            for i, (name, ip) in enumerate(available_users.items(),1 ):
+                print(f" {i}. {name}({ip})")
+
+            try:
+                user_choice = int(input("\nWybierz odbiorce: "))
+                if user_choice < 1 or user_choice > i:
+                    print("Nieprawidłowy wybór")
+                    continue
+                seleted_user = list(available_users.items())[user_choice - 1]
+                target_ip = seleted_user[1]
+
+
+                file_path = input("Podaj ścieżkę do pliku: ")
+                file_path = file_path
+                password = (input("Zaszyfruj plik hasłem: ").encode())
+                szyfrowanie.encrypt_file(file_path, password)
+                enc_file_path = file_path + ".enc"
+            
+                print(f"Wysyłanie pliku do użykownika {seleted_user[0]}")
+                port = 8080
+                send_file(enc_file_path, target_ip, port)
+            except ValueError:
+                print("Nieprawidłowy wybór")
+                continue
+            except Exception as e:
+                logger.error(f"Wystąpił błąd: str{e}")
+                continue 
             
         
         elif choice == '2':
-            sender_ip = input("Wpisz adres IP osoby wysyłającej: ")
-
             port = int(8080)
-            receive_file(sender_ip, port)
+            receive_file(port)
             
         
         elif choice == 'q':
