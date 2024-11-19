@@ -30,5 +30,9 @@ def decrypt_file(encrypted_file_path, password):
             file.write(decrypted_data)
 
         print("Plik został odszyfrowany i zapisany jako:", original_file_path)
+        return True
     except:
         print("Odszyfrowanie nie powiodło się.")
+        return False
+    
+

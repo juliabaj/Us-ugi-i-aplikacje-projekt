@@ -13,12 +13,18 @@ import re
 import szyfrowanie
 import deszyfrowanie
 
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+global status
+status = True
+processing = False
+
+lock = threading.Lock()
 def get_available_users(mac_list):
     available_users = {}
     try:
@@ -127,19 +133,22 @@ class P2PFileTransfer:
                     
     def _handle_client_connection(self, client_socket, address):
         try:
-            command = self._recv_with_length_prefix(client_socket)
-            if not command:
-                return
-            command = command.decode('utf-8').strip()
+            with lock: 
+                command = self._recv_with_length_prefix(client_socket)
+                processing = True
+                if not command:
+                    return
+                command = command.decode('utf-8').strip()
             
-            if command.startswith("SEND"):
-                self._receive_file(client_socket)
-            else:
-                logger.warning(f"Nieznana komenda wysłana przez {address}: {command}")
+                if command.startswith("SEND"):
+                    self._receive_file(client_socket)
+                else:
+                    logger.warning(f"Nieznana komenda wysłana przez {address}: {command}")
                 
         except Exception as e:
             logger.error(f"Błąd utrzymywania połączenia z {address}: {e}")
         finally:
+            processing = False
             try:
                 client_socket.shutdown(socket.SHUT_RDWR)
                 client_socket.close()
@@ -212,7 +221,9 @@ class P2PFileTransfer:
                     pass
                     
     def _receive_file(self, client_socket):
+        global status
         try:
+            status = False
             file_info = self._recv_with_length_prefix(client_socket)
             if not file_info:
                 logger.error("Nie otrzymano informacji o pliku")
@@ -232,7 +243,8 @@ class P2PFileTransfer:
                 
             download_path = Path("downloads")
             download_path.mkdir(exist_ok=True)
-            
+
+
             with open(download_path / filename, 'wb') as f:
                 with tqdm(total=filesize, unit='B', unit_scale=True, desc=f"Receiving {filename}") as pbar:
                     received = 0
@@ -250,16 +262,36 @@ class P2PFileTransfer:
                         
             logger.info(f"Plik {filename} otrzymany pomyślnie")
             output_path = Path("downloads") / filename
-            password = (input("Podaj hasło aby odszyfrować plik: ").encode())
+
             path = output_path
             print(f"To jest ścieżka do pliku {path}")
+
+            print("Naciśnij enter, aby przejść dalej")
+
             path = r"{}".format(path)
-            deszyfrowanie.decrypt_file(path, password)
-            
+            decryption = False
+            try_again = 3
+            while not decryption and try_again > 0:
+                password = (input("Podaj hasło aby odszyfrować plik: ").encode())
+                decryption = deszyfrowanie.decrypt_file(path, password)
+                if decryption:
+                    time.sleep(2)
+                    break
+                try_again -= 1
+                if try_again > 0:
+                    print(f"Liczba prób: {try_again}")
+                    retry = input("Czy chcesz spróbować ponowanie(t/n): ").lower()
+                    if retry != "t":
+                        break 
+                else:
+                    continue 
+            status = True
         except Exception as e:
             logger.error(f"Błąd podczas odbierania pliku: {str(e)}")
+            status = True
             raise
             
+
     def _validate_ip(self, ip_address):
         try:
             ipaddress.ip_address(ip_address)
@@ -276,6 +308,7 @@ class P2PFileTransfer:
                 logger.error(f"Błąd zamykania socketu: {e}")
 
 def main():
+    global status
     p2p = P2PFileTransfer(listen_port=8000)
     p2p.start_listening()
     
@@ -284,35 +317,43 @@ def main():
 
     try:
         while True:
-            print("\nZaszyfrowane wysyłanie pliku")
-            print("1. Wyślij plik")
-            print("q. Quit")
+            if status:
+                print("\nZaszyfrowane wysyłanie pliku")
+                print("1. Wyślij plik")
+                print("q. Quit")
             
-            choice = input("\nWybierz opcję: ").lower()
-            
-            if choice == '1':
-                available_user = get_available_users(mac_list)
-                print(f"Dostepni uzytkownicy: {available_user}")
-                user = input("Wpisz nazwe użytkonika do, którego chcesz wysłać plik: ")
-                if user in available_user:
-                    target_ip = available_user[user]
-                    print(f"Adres IP użytkownika {user} to: {target_ip}")
-                else:
-                    print("Podany użytkownik nie jest dostępny")
-                target_port = 8000
-                file_path = input("Podaj ścieżkę do pliku: ")
-                password = (input("Zaszyfruj plik hasłem: ").encode())
-                szyfrowanie.encrypt_file(file_path, password)
-                enc_file_path = file_path + ".enc"
+                choice = input("\nWybierz opcję: ").lower()
+
+                if choice == '1':
+                    status = False
+                    available_user = get_available_users(mac_list)
+                    print(f"Dostepni uzytkownicy: {available_user}")
+                    user = input("Wpisz nazwe użytkonika do, którego chcesz wysłać plik: ")
+                    if user in available_user:
+                        target_ip = available_user[user]
+                        print(f"Adres IP użytkownika {user} to: {target_ip}")
+                    else:
+                        print("Podany użytkownik nie jest dostępny")
+                        continue
                 
-                if os.path.exists(file_path):
-                    p2p.send_file(enc_file_path, target_ip, target_port)
-                else:
-                    print("Plik nie istnieje")
+                    target_port = 8000
+                    file_path = input("Podaj ścieżkę do pliku: ")
+                    password = (input("Zaszyfruj plik hasłem: ").encode())
+                    szyfrowanie.encrypt_file(file_path, password)
+                    enc_file_path = file_path + ".enc"
+                
+                    if os.path.exists(file_path):
+                        p2p.send_file(enc_file_path, target_ip, target_port)
+                        status = True
+                    else:
+                        print("Plik nie istnieje")
+                        status = True
                     
-            elif choice == 'q':
-                break
-                
+                elif choice == 'q':
+                    print("Zamykanie kleinta...")
+                    break
+            else:
+                time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nZamykanie klienta...")
     finally:
