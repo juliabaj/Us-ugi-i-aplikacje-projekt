@@ -22,9 +22,7 @@ logger = logging.getLogger(__name__)
 
 global status
 status = True
-processing = False
 
-lock = threading.Lock()
 def get_available_users(mac_list):
     available_users = {}
     try:
@@ -132,23 +130,20 @@ class P2PFileTransfer:
                     time.sleep(1) 
                     
     def _handle_client_connection(self, client_socket, address):
-        try:
-            with lock: 
-                command = self._recv_with_length_prefix(client_socket)
-                processing = True
-                if not command:
-                    return
-                command = command.decode('utf-8').strip()
+        try:  
+            command = self._recv_with_length_prefix(client_socket)
+            if not command:
+                return
+            command = command.decode('utf-8').strip()
             
-                if command.startswith("SEND"):
-                    self._receive_file(client_socket)
-                else:
-                    logger.warning(f"Nieznana komenda wysłana przez {address}: {command}")
+            if command.startswith("SEND"):
+                self._receive_file(client_socket)
+            else:
+                logger.warning(f"Nieznana komenda wysłana przez {address}: {command}")
                 
         except Exception as e:
             logger.error(f"Błąd utrzymywania połączenia z {address}: {e}")
         finally:
-            processing = False
             try:
                 client_socket.shutdown(socket.SHUT_RDWR)
                 client_socket.close()
